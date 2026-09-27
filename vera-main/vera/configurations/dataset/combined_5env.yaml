@@ -1,0 +1,132 @@
+# Combined 5-environment mixture: combined_4env + PushT (packed-NPZ video route).
+#
+# Identical to combined_4env.yaml except: name, the subset/pusht block, and the
+# 5-way weight maps. Each batch element stays [T=37, 3, 128, 576]; per-subset
+# filled/black canvas extents:
+#   DROID 576/0 · Allegro_sim 384/192 · Allegro_real 256/320 · MimicGen 256/320
+#   · PushT 128/448.
+#
+# PushT is served from the packed NPZ (JPEG 504x504, single view "00", 10 fps,
+# 206 episodes, 49-246 frames each) via PackedSource + PackedViewLoader +
+# VideoModelDataset (registered as "pusht" in vera/datasets/registry.py).
+# Packed episodes carry no CSV caption, so the fixed prompt is supplied via the
+# subset-level `id_token` (prompts = id_token + caption; caption == "" for packed).
+# NOTE: do NOT set id_token at the outer level — it is a propagated field and
+# would overwrite every subset's empty id_token (droid/mimicgen captions would
+# get the pusht prefix).
+
+# --- uniform (propagated) fields ---
+name: combined_5env
+n_frames: 37
+height: 128
+max_text_tokens: 512
+image_to_video: true
+load_optical_flow: false
+pad_to_width: 576
+
+# Outer width = canvas for the algorithm (wan lat_w). NOT propagated (each subset
+# keeps native width for per_view_w = width // n_views).
+width: 576
+pad_views_to: 3
+propagate_skip: [width, pad_views_to]
+fps: null            # not propagated as None; each subset keeps native fps.
+
+debug: false
+
+subset/allegro_sim:
+  name: allegro_sim
+  layout: tiled
+  data_root: /path/to/data/kitti/allegro_sim/
+  metadata_path: /path/to/flow-planner/datasets/allegro_apptainer_directional.csv
+  height: 128
+  width: 384
+  n_frames: 37
+  fps: 10
+  concat_views: ["camera_0_rgb", "camera_1_rgb", "camera_2_rgb"]
+  trim_mode: random_cut
+  pad_mode: pad_last
+  load_optical_flow: false
+  pad_to_width: 576
+  download: {override_fps: 10, views: ["camera_0_rgb", "camera_1_rgb", "camera_2_rgb"]}
+
+subset/allegro_real:
+  name: allegro_real
+  layout: tiled
+  data_root: /path/to/data/jacobian/allegro_real_v2
+  metadata_path: /path/to/flow-planner/datasets/allegro_real_v2_metadata.csv
+  height: 128
+  width: 256
+  n_frames: 37
+  fps: 10
+  concat_views: ["211122063441_rgb", "211522062345_rgb"]
+  trim_mode: random_cut
+  pad_mode: pad_last
+  load_optical_flow: false
+  pad_to_width: 576
+  download: {override_fps: 50, views: ["211122063441_rgb", "211522062345_rgb"]}
+
+subset/mimicgen:
+  name: mimicgen
+  layout: tiled
+  data_root: /path/to/data/kitti/mimicgen_datasets_rendered_compressed/core
+  metadata_path: /path/to/flow-planner/datasets/mimicgen_all_dualview_metadata.csv
+  height: 128
+  width: 256
+  n_frames: 37
+  fps: 10
+  concat_views: ["agentview_image_rgb", "robot0_eye_in_hand_image_rgb"]
+  trim_mode: random_cut
+  pad_mode: pad_last
+  load_optical_flow: false
+  pad_to_width: 576
+  download: {override_fps: 10, views: ["agentview_image_rgb", "robot0_eye_in_hand_image_rgb"]}
+
+subset/droid_flow:
+  name: droid_flow
+  layout: tiled
+  data_root: /path/to/data/acid/droid_raw/1.0.1
+  metadata_path: metadata_droid_raw_mv_cleaned_captioned.csv
+  height: 128
+  width: 576
+  n_frames: 37
+  fps: 30
+  temporal_stride: 2
+  concat_views: ["ext1", "ext2", "wrist"]
+  pad_views_to: 3
+  trim_mode: random_cut
+  pad_mode: pad_last
+  load_optical_flow: false
+  pad_to_width: 576
+  download: {override_fps: 60, views: ["ext1", "ext2", "wrist"]}
+
+# --- PushT (packed-NPZ video route, single top-down view) ---
+# Routed to PackedSource + PackedViewLoader + VideoModelDataset (tiled) via the
+# "pusht" entry in registry._SOURCES. native: 504x504 JPEG -> bilinear 128x128
+# (1 view -> per_view_w = width // 1 = 128), fps 10 -> stride 1, canvas
+# black-padded 128 -> 576 on the right. All 206 episodes >= 49 frames (> 37),
+# so random_cut always yields a real window (pad_last never triggers).
+subset/pusht:
+  name: pusht
+  layout: tiled
+  data_root: ${oc.env:VERA_DATA_PREFIX,/path/to/data}/datasets/jacobian/pusht_packed
+  height: 128
+  width: 128            # 1 view x 128; per-view square 128x128.
+  n_frames: 37
+  fps: 10
+  concat_views: ["00"]  # the single packed view name.
+  trim_mode: random_cut
+  pad_mode: pad_last
+  load_optical_flow: false
+  pad_to_width: 576
+  # Fixed prompt (packed episodes have no caption column). prompts = id_token + "".
+  id_token: "Top-down view of a planar pushing task: a blue circular pusher pushes a gray T-shaped block onto the green T-shaped target on a white board."
+  download: {override_fps: 10, views: ["00"]}
+
+# --- subset-balanced absolute weighting (each subset drawn with p = w / sum(w)) ---
+training:
+  weight_type: absolute
+  weight: {allegro_sim: 1.0, allegro_real: 1.0, mimicgen: 1.0, droid_flow: 1.0, pusht: 1.0}
+
+validation:
+  weight_type: absolute
+  weight: {allegro_sim: 1.0, allegro_real: 1.0, mimicgen: 1.0, droid_flow: 1.0, pusht: 1.0}

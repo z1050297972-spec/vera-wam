@@ -1,0 +1,36 @@
+# Released PushT noise pack — hosted as `pusht-noise-packed/` on
+# huggingface.co/sizhe-lester-li/VERA (18,685 episodes, ~61 GB).
+# Layout: $VERA_DATA_PREFIX/datasets/jacobian/pusht_noise_packed
+# (see TRAINING.md, "Get the training data (PushT)").
+defaults:
+- pusht_noise
+root: ${oc.env:VERA_DATA_PREFIX,/path/to/data}/datasets/jacobian/pusht_noise_packed
+# Global agent-state bounds over the full 18,685-episode states.pth (channels 0-1).
+state_q_min:
+- -153.00656127929688
+- -90.59517669677734
+state_q_max:
+- 666.1377563476562
+- 723.6395263671875
+action_normalization_mode: symmetric_percentile
+action_percentile: 90.0
+# action_abs_scale folds TWO per-channel factors into one divisor so vera's
+# generic QposDeltaAction reproduces the internal noise action model exactly
+# (max deviation < 1e-8, verified against a reference implementation):
+#   (1) the raw p90 |du| stats of the internal model's output
+#       [1.984997987747195, 2.0815593004226693], and
+#   (2) (state_q_max - state_q_min) / 2 per channel — the state -> [-1, 1]
+#       min-max normalization the internal model applies BEFORE the delta,
+#       which QposDeltaAction (raw-state finite difference) does not.
+# I.e. abs_scale[c] = p90[c] * (q_max[c] - q_min[c]) / 2; the training-time du is
+# (q[t+1]-q[t]) * du_scale / abs_scale = (norm(q[t+1])-norm(q[t])) * du_scale / p90.
+action_abs_scale:
+- 812.9999110820256
+- 847.4389094448433
+flow_normalization_space: raw_fullres
+flow_normalization_mode: symmetric_percentile
+oflow_scale: null
+oflow_percentile: 90.0
+oflow_abs_scale:
+- 0.047929879277944565
+- 0.04020048677921295

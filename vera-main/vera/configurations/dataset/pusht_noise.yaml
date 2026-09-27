@@ -1,0 +1,54 @@
+# PushT random-exploration ("noise") dataset — base config.
+#
+# 18,685 episodes of uniform-random pusher exploration from the DINO-WM PushT
+# dataset (Zhou et al., "DINO-WM"), re-rendered with gym-pusht at 504x504 and
+# packed into VERA's packed-NPZ format (see pusht_noise_packed.yaml for the
+# released pack + normalization stats).
+#
+# ACTIONS ARE SELF-CONTAINED: unlike the standard PushT set (whose command
+# actions live in pusht_cchi_v7_replay.zarr, read via dataset.pusht_zarr_root),
+# the noise pack embeds the per-episode agent state in each NPZ (`traj_state`,
+# float32 [T, 2]). Train-time du is a state finite-difference — internally
+# du = (norm(q[t+1]) - norm(q[t])) * du_scale with q min-max normalized to
+# [-1, 1] by the global state bounds. vera's generic QposDeltaAction computes
+# the same thing up to a per-channel constant, which pusht_noise_packed.yaml
+# folds into action_abs_scale (see the comment there). No external download is
+# needed for actions.
+defaults:
+  - base_dataset_with_algo
+
+name: pusht
+robot_name: pusher
+dataset_type: noise
+root: ???
+overfit_idx: null
+
+resolution: 252
+oflow_scale: 1.0
+du_scale: 10.0
+
+# IDM action model: state finite-difference over the in-NPZ traj_state.
+# (name "pusht" would otherwise default to pusht_pos_cmd, which requires the
+# replay zarr that does not exist for the noise episodes.)
+action_mode: qpos_delta
+qpos_key: state
+qpos_indices: [0, 1]
+action_scale: 1.0
+
+sampling:
+  num_frames: 4
+  linearize_time_length: 1
+
+camera:
+  views: ["00"]
+  image_size: ["${dataset.resolution}", "${dataset.resolution}"]
+
+load_motion_tracks: false
+
+# Algorithm-facing
+save_dir: data/pusht_noise_placeholder
+max_frames: 5
+context_length: 2
+observation_shape: [5, "${dataset.resolution}", "${dataset.resolution}"]
+data_mean: [[[0.0]], [[0.0]], [[0.0]], [[0.0]], [[0.0]]]
+data_std: [[[1.0]], [[1.0]], [[1.0]], [[1.0]], [[1.0]]]

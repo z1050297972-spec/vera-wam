@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Env / tooling
+.venv/
+venv/
+.python-version
+*.pth.tmp
+
+# Data / artifacts (never commit)
+/data/
+outputs/
+logs/
+*.log
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.mp4
+*.zarr/
+*.h5
+*.hdf5
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# debug sweep scratch
+_sweep_out/
+_sweep_mimicgen.sh
+outputs/
+slurm_logs/
+examples/droid_demo_videos/
+examples/outputs/
+examples/logs/
+vera-ckpts/
+.venv_pusht_eval/
+
+# PushT reproduction: ship the viewer + flattened videos + merged episode
+# data; keep the raw per-shard scratch (internal absolute paths, staging
+# noise) out.
+examples/results/*shard*.jsonl
+examples/results/wide_aligned_repro_v1.jsonl
+examples/results/wide_aligned_repro_video.jsonl
+!examples/results/videos/*.mp4
