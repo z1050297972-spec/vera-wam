@@ -1,0 +1,18 @@
+# measure 命令的测量结果（每台机器的原始刻度都不同，属于本地产物）
+measure/
+
+# Jupyter 自动保存的检查点副本
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+env/
