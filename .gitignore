@@ -1,5 +1,14 @@
 # measure 命令的测量结果（每台机器的原始刻度都不同，属于本地产物）
-measure/
+# 只匹配仓库根目录：写成 `measure/` 会连带忽略 vera-main/measure 之类的子目录
+/measure/
+
+# 遥操作录制的原始数据（parquet + mp4，二进制大文件，不进版本库）
+# 同样只匹配根目录 —— 否则 `data/` 会把 vera-main/scripts/data/ 整个吃掉，
+# 里面的 pack_pusht.py / pack_lerobot.py / check_packed.py 就永远不会进版本库
+/data/
+
+# 编辑器/agent 工具自身的配置，不进版本库（注意不要加斜杠，那是目录匹配）
+.zcodeignore
 
 # Jupyter 自动保存的检查点副本
 .ipynb_checkpoints/

@@ -20,7 +20,7 @@
     ports       适配器发现、角色判定、端口解析
     bus         串口总线会话（Arm 类）
     hardware    自检 / 深度探测 / 状态快照 / 力矩安全预处理
-    calibration 两趟标定 + 验证 + 主从对比
+    calibration 两趟标定 + 验证 + 主从对比 + wrist_roll 零点对齐
     align       主从姿态对齐（以主臂为基准）
     camera      摄像头：设备发现 / 设置锁定 / 体检 / 存帧 / 预览
     ui          终端实时刷新
@@ -36,7 +36,9 @@ from .bus import Arm
 from .camera import check_camera, check_simultaneous, find_devices, run_camera
 from .calibration import (
     compare_arms,
+    compute_wrist_fix,
     finalize_two_pass,
+    fix_wrist,
     measure_travel,
     show_angles_to_midpoints,
     verify_arm,
@@ -74,8 +76,8 @@ __all__ = [
     # 硬件
     "check_all", "check_arm", "deep_probe", "prep_goal_safe", "read_state",
     # 标定
-    "compare_arms", "finalize_two_pass", "measure_travel",
-    "show_angles_to_midpoints", "verify_arm",
+    "compare_arms", "compute_wrist_fix", "finalize_two_pass", "fix_wrist",
+    "measure_travel", "show_angles_to_midpoints", "verify_arm",
     # 主从对齐
     "align_arms",
     # 摄像头

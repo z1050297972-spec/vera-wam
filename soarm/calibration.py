@@ -33,6 +33,7 @@ from .constants import (
     state_file,
 )
 from .encoding import (
+    decode_sign_magnitude,
     encode_sign_magnitude,
     shortest_arc,
     ticks_from,
@@ -489,6 +490,264 @@ def finalize_two_pass(role: str, arm_id: str, travel: dict, dry_run: bool = Fals
         print(f"  2047 在各关节量程中的位置: {' '.join(f'{x:.0f}%' for x in pcts)}"
               f"   （应接近 50%）")
         return calib
+
+
+# ================================================================ wrist_roll 零点对齐
+# 五个行程关节的零点都锚在【各自实测行程的中点】上，两条臂因此天然对应 ——
+# 数据上的证据：shoulder_lift 在三个数据集里都被推到了同一个物理下限，两臂读数
+# −104.0 / −103.2，只差 0.8°。
+#
+# wrist_roll 没有行程可测（lerobot 写死量程 0..4095），零点只能取"写偏移那一刻
+# 手腕的朝向"—— 两条臂在不同时间、不同姿态写入，就会差出一个固定角度。
+# 实测 2026-10-03：从臂在自己的物理尽头读 −80.1°，主臂在同一物理尽头读 −98.9°，
+# 差 18.8°（214 刻度）。后果：采数据时从臂提前顶住，observation 的最低限位与
+# action 对不上（−80 vs −99），那一段的 action 从臂物理上执行不了。
+#
+# 原理（lerobot feetech.py: Present_Position = Actual_Position − Homing_Offset）：
+# 同一个物理方向上 raw_从 − raw_主 恒等于两臂的零点差。所以在两个共同的物理
+# 方向上各读一次、取平均，Δh = mean(raw_从 − raw_主)，把从臂偏移加上 Δh 即可。
+# 取两端平均 = 对齐两臂行程的中点（和五个行程关节同一套思路），线缆松紧造成的
+# 宽度差被平摊到两端。
+#
+# 只动从臂这一个寄存器：其余 5 个关节现在的对应关系是好的（上面 shoulder_lift
+# 的证据），不能因为重跑整套 finalize 而被 10-03 那份重新手测的行程数据改动。
+WRIST_FIX_REFUSE_TICKS = 200.0   # 两端读数差差这么多：多半没推到同一对物理方向
+WRIST_FIX_WARN_TICKS = 30.0      # 超过它提示两臂行程宽度有差（每端差一半）
+
+# lerobot 的 DEGREES 归一化用 分辨率−1 = 4095 当整圈，这里必须和它一致，
+# 否则显示的度数和数据集里记的差一点点（0.02%，不影响判断，但没必要有偏差）。
+LEROBOT_MAX_RES = RES - 1
+
+
+def wrist_deg(raw: int, calib: dict) -> float:
+    """按标定把 raw 换算成 lerobot 记录的度数（相对量程中点，见 motors_bus._normalize）。"""
+    c = calib[FULL_TURN]
+    mid = (c["range_min"] + c["range_max"]) / 2
+    return (raw - mid) * 360.0 / LEROBOT_MAX_RES
+
+
+def compute_wrist_fix(pairs: list, old_offset: int) -> tuple[int, list, list]:
+    """由两次"共同方向"读数算出从臂 wrist_roll 的新 Homing_Offset。纯计算。
+
+    pairs = [(主臂 raw, 从臂 raw), (主臂 raw, 从臂 raw)]，两个方向各一次。
+    返回 (new_offset, notes, problems)；problems 非空时不要写入。
+    """
+    notes, problems = [], []
+    deltas = []
+    for i, (rl, rf) in enumerate(pairs, 1):
+        d = shortest_arc(rf - rl)
+        deltas.append(d)
+        notes.append(f"方向{i}: 主臂 {rl:>5} / 从臂 {rf:>5} → 读数差 "
+                     f"{d:+.0f} 刻度 ({ticks_to_deg(d):+.1f}°)")
+
+    spread = abs(deltas[0] - deltas[1])
+    if spread > WRIST_FIX_REFUSE_TICKS:
+        problems.append(
+            f"两个方向的读数差相差 {spread:.0f} 刻度（{ticks_to_deg(spread):.1f}°）——"
+            f"两条臂是同一套硬件，端点上不该差这么多。多半两次没推到同一对物理"
+            f"方向（有一条臂推反了？），重新测一次。"
+        )
+    elif spread > WRIST_FIX_WARN_TICKS:
+        notes.append(
+            f"⚠️ 两端的读数差相差 {spread:.0f} 刻度（{ticks_to_deg(spread):.1f}°）："
+            f"两臂手腕的可转范围宽度不同（线缆松紧），按中点对齐后两端各差约 "
+            f"{ticks_to_deg(spread / 2):.1f}°。"
+        )
+
+    delta = sum(deltas) / 2
+    new_offset = int(round(old_offset + delta))
+    if abs(new_offset) > 2047:
+        problems.append(f"新偏移 {new_offset} 超出 ±2047（Homing_Offset 幅值上限），拒绝写入。")
+    notes.append(f"从臂 wrist_roll 偏移: {old_offset:+} → {new_offset:+}"
+                 f"（Δ {delta:+.0f} 刻度 = {ticks_to_deg(delta):+.1f}°）")
+    return new_offset, notes, problems
+
+
+def write_wrist_eeprom(a: Arm, new_offset: int) -> bool:
+    """写从臂 wrist_roll 的 Homing_Offset（EEPROM），并做安全收尾。
+
+    顺序是关键（舵机行为实测，见 prep_goal_safe 的说明）：
+      解锁 → 写偏移 → 回读 → Goal := 新读数 → 关力矩（最后）
+    写 Goal 会自行打开力矩，所以必须补关；写偏移后读数会整体平移、而 Goal 还是
+    旧值，不先把 Goal 对齐就开力矩会让臂朝旧位置冲。
+    """
+    mid = MOTORS[FULL_TURN]
+    a.wr(mid, "Lock", 0)
+    if not a.wr(mid, "Homing_Offset", encode_sign_magnitude(new_offset), length=2):
+        print("  ✗ 写 Homing_Offset 失败（总线无响应？）")
+        return False
+    back = a.rd(mid, "Homing_Offset", 2)
+    if back is None or decode_sign_magnitude(back) != new_offset:
+        print(f"  ✗ 回读不一致：期望 {new_offset}，读到 {back}")
+        return False
+    now = a.rd(mid, "Present_Position", 2)
+    if now is not None:
+        a.wr(mid, "Goal_Position", now, length=2)
+    a.wr(mid, "Torque_Enable", 0)
+    return True
+
+
+def update_wrist_json(role: str, arm_id: str, new_offset: int) -> Path:
+    """只改 lerobot 标定 JSON 里 wrist_roll 的 homing_offset，其余原样写回。
+
+    必须和 EEPROM 一致：lerobot 连接时会用文件里的标定写舵机，
+    只改 EEPROM 不改文件的话，下次连接就被改回去了。
+    """
+    p = calibration_path(role, arm_id)
+    calib = json.loads(p.read_text())
+    calib[FULL_TURN]["homing_offset"] = new_offset
+    p.write_text(json.dumps(calib, indent=4, ensure_ascii=False))
+    return p
+
+
+def fix_wrist(arm_id: str, dry_run: bool = False) -> int:
+    """把从臂 wrist_roll 的零点对齐到主臂（只动这一个关节）。
+
+    交互：两条臂的手腕一起推到同一个物理尽头 → 按 x；再推到另一个尽头 → 按 x。
+    然后算 Δh 写入从臂 EEPROM + lerobot 的标定 JSON，最后进入验证显示。
+    """
+    role = "follower"
+    p = calibration_path(role, arm_id)
+    if not p.exists():
+        print(f"❌ 找不到从臂标定文件: {p}")
+        print("   先做标定，或确认 --id 与文件名一致。")
+        return 1
+    calib = json.loads(p.read_text())
+
+    print(f"对齐 {FULL_TURN} 零点（以{ARM_INFO['leader']['cn']}为准，只改"
+          f"{ARM_INFO[role]['cn']} 的这一个关节）")
+    print("  为什么单独修它：其余 5 个关节的零点取自各自【实测行程的中点】，")
+    print(f"  天生对应；{FULL_TURN} 整圈旋转、没有行程可测，零点只能取写入那一刻的")
+    print("  朝向，两条臂不同时间写入就会差出一个固定角度。")
+    print()
+    print("把【两条臂的手腕】一起推到【同一个物理尽头】（哪一头都行，但两条臂要同")
+    print("一头），推到底后按 x 记录；然后再一起推到另一头，按 x。")
+    print()
+
+    wl = wf = MOTORS[FULL_TURN]
+    caps: list[tuple[int, int]] = []
+    new_offset = None
+
+    with Arm("leader") as lead, Arm("follower") as fol, KeyWatcher() as keys:
+        lead.wr(wl, "Torque_Enable", 0)      # 手腕要能用手转
+        fol.wr(wf, "Torque_Enable", 0)
+        eeprom_old = decode_sign_magnitude(fol.rd(wf, "Homing_Offset", 2))
+        json_old = calib[FULL_TURN]["homing_offset"]
+
+        # ---------- 两次取点 ----------
+        scr = Screen()
+        last_limp = 0.0
+        try:
+            while len(caps) < 2:
+                if time.time() - last_limp > LIMP_REFRESH_S:
+                    lead.wr(wl, "Torque_Enable", 0)
+                    fol.wr(wf, "Torque_Enable", 0)
+                    last_limp = time.time()
+
+                rl = lead.rd(wl, "Present_Position", 2)
+                rf = fol.rd(wf, "Present_Position", 2)
+                lines = [
+                    f"{FULL_TURN} 零点对齐 —— 第 {len(caps) + 1}/2 个方向",
+                    "",
+                    f"  {'臂':<6} {'当前(raw)':>10} {'当前(°)':>9}",
+                    "  " + "-" * 30,
+                    f"  {'主臂':<6} {rl:>10} {wrist_deg(rl, calib):>8.1f}°"
+                    if rl is not None else f"  {'主臂':<6}   读取失败",
+                    f"  {'从臂':<6} {rf:>10} {wrist_deg(rf, calib):>8.1f}°"
+                    if rf is not None else f"  {'从臂':<6}   读取失败",
+                ]
+                if rl is not None and rf is not None:
+                    d = shortest_arc(rf - rl)
+                    lines += [
+                        "",
+                        f"  当前读数差 {d:+.0f} 刻度 = {ticks_to_deg(d):+.1f}°"
+                        f"（两臂摆到同一物理方向后，这就是零点差）",
+                    ]
+                lines += [
+                    "",
+                    "  >>> 两条臂手腕一起推到同一个物理尽头，按 x 记录"
+                    if not caps else
+                    "  >>> 再一起推到另一个物理尽头，按 x 记录",
+                ]
+                scr.draw(lines)
+
+                key = keys.poll()
+                if key and key.lower() in ("x", " ", "\r", "\n"):
+                    if rl is None or rf is None:
+                        pass                    # 读不到读数，忽略这次按键
+                    else:
+                        caps.append((rl, rf))
+                        while keys.poll() is not None:   # 清掉缓冲里剩的按键
+                            pass
+                time.sleep(REFRESH_INTERVAL_S)
+        finally:
+            scr.close()
+
+        if eeprom_old is None:
+            print("  ✗ 读不到从臂 wrist_roll 的 Homing_Offset，未做任何写入。")
+            return 1
+
+        # ---------- 计算 ----------
+        print("  两个方向的读数：")
+        new_offset, notes, problems = compute_wrist_fix(caps, eeprom_old)
+        for n in notes:
+            print(f"    {n}")
+        if json_old != eeprom_old:
+            print(f"    ⚠️  标定文件里的偏移 ({json_old:+}) 与舵机 EEPROM ({eeprom_old:+}) "
+                  f"不一致 —— 现在两处一起写成新值。")
+        if problems:
+            print("  ❌ 校验未通过，未写入：")
+            for x in problems:
+                print(f"     - {x}")
+            return 1
+        print()
+
+        if dry_run:
+            print("  （dry-run：只测只算，未写入任何寄存器/文件。去掉 --dry-run 即写入。）")
+            return 0
+
+        # ---------- 写入 ----------
+        if not write_wrist_eeprom(fol, new_offset):
+            return 1
+        jp = update_wrist_json(role, arm_id, new_offset)
+        print(f"  ✅ 已写入：舵机 EEPROM + {jp}")
+        print(f"     效果：两臂在同一物理方向的读数差从原来那个值变成 0；"
+              f"从臂的可用行程与主臂重合，")
+        print(f"           不会再提前顶住（采数据时最低限位两边一致）。")
+        print()
+
+        # ---------- 验证显示 ----------
+        print("  验证：把两条臂的手腕再摆到同一个物理方向，两行的度数应该一致。")
+        print("  按 x 结束（Ctrl-C 也可以）。")
+        print()
+        scr = Screen()
+        try:
+            while True:
+                rl = lead.rd(wl, "Present_Position", 2)
+                rf = fol.rd(wf, "Present_Position", 2)
+                lines = [
+                    f"{FULL_TURN} 零点对齐 —— 验证（按 x 结束）",
+                    "",
+                    f"  {'臂':<6} {'当前(raw)':>10} {'当前(°)':>9}",
+                    "  " + "-" * 30,
+                    f"  {'主臂':<6} {rl:>10} {wrist_deg(rl, calib):>8.1f}°"
+                    if rl is not None else f"  {'主臂':<6}   读取失败",
+                    f"  {'从臂':<6} {rf:>10} {wrist_deg(rf, calib):>8.1f}°"
+                    if rf is not None else f"  {'从臂':<6}   读取失败",
+                ]
+                if rl is not None and rf is not None:
+                    d = shortest_arc(rf - rl)
+                    mark = "✓ 已对齐" if abs(ticks_to_deg(d)) < 2.0 else "← 还没摆到同一方向？"
+                    lines += ["", f"  度数差 {ticks_to_deg(d):+.1f}°   {mark}"]
+                scr.draw(lines)
+                key = keys.poll()
+                if key and key.lower() in ("x", " ", "\r", "\n"):
+                    break
+                time.sleep(REFRESH_INTERVAL_S)
+        finally:
+            scr.close()
+        print("  完成。力矩已关（手腕可以继续用手掰）。")
+    return 0
 
 
 # ================================================================ 验证

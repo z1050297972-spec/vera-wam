@@ -31,6 +31,7 @@ EPILOG = """\
   # 3. 验证与遥操作
   python -m soarm verify follower --id my_follower          # 只读检查
   python -m soarm verify follower --id my_follower --move   # 小幅运动测试
+  python -m soarm fix-wrist --id my_follower                # 修 wrist_roll 零点（两臂手腕推到同一对方向）
   python -m soarm align                   # 读主臂位姿，把从臂对齐过去（按 x 结束）
   python -m soarm prep follower           # 开力矩前的安全预处理
 
@@ -102,6 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("compare", help="主从零点对齐检查")
     p.set_defaults(func=_cmd_compare)
+
+    p = sub.add_parser("fix-wrist",
+                       help="对齐 wrist_roll 零点：两臂手腕推到同一对方向，只改从臂这一个关节")
+    p.add_argument("--id", required=True, help="从臂标定文件名（如 my_follower）")
+    p.add_argument("--dry-run", action="store_true", help="只测只算，不写入")
+    p.set_defaults(func=_cmd_fix_wrist)
 
     p = sub.add_parser("align", help="读主臂位姿，把从臂对齐到同一个姿态（按 x 结束）")
     p.add_argument("--dry-run", action="store_true",
@@ -199,6 +206,10 @@ def _cmd_verify(args) -> int:
 
 def _cmd_compare(args) -> int:
     return calibration.compare_arms()
+
+
+def _cmd_fix_wrist(args) -> int:
+    return calibration.fix_wrist(args.id, dry_run=args.dry_run)
 
 
 def _cmd_align(args) -> int:

@@ -1103,9 +1103,13 @@ class ImageJacobian(BasePytorchAlgo):
                     for k, vframes in vis_dict.items()
                 }
 
-                self.logger.experiment.log(
-                    {**log_dict, "trainer/global_step": self.global_step}
-                )
+                # `self.logger` is None when wandb is disabled (wandb.mode=disabled);
+                # on_validation_end already guards for that, this call site did not
+                # and crashed the whole validation pass.
+                if self.logger is not None:
+                    self.logger.experiment.log(
+                        {**log_dict, "trainer/global_step": self.global_step}
+                    )
                 media_elapsed = time.perf_counter() - media_t0
                 self._validation_media_log_s += media_elapsed
                 step_media_log_s += media_elapsed

@@ -1,0 +1,136 @@
+# Train the VERA Jacobian IDM for SO-ARM101 on our own tabletop pick-and-place
+# recordings (packed by scripts/data/pack_lerobot.py -> soarm_packed).
+#
+#   python -m vera.main --config-name=config_jacobian_soarm_vggt wandb.mode=disabled
+#
+# Structure copied from config_jacobian_mimicgen_vggt_v3_taskbalanced (the
+# released MimicGen IDM recipe) minus its 9 per-task validation sets — this is a
+# single task, so validation pins one held-out episode instead.
+defaults:
+  - config
+  # A validation_datasets entry must be a FULL dataset config (the data module
+  # reads `name` from it), so pull the dataset group in with `@` and only
+  # override the pin below — same shape as the released mimicgen run.
+  - /dataset/soarm_packed@validation_datasets.soarm
+  - override /experiment: jacobian_learning
+  - override /dataset: soarm_packed
+  - override /algorithm: image_jacobian
+  - override /algorithm/model: soarm_vggt_jacobian
+  - _self_
+
+validation_include_all: true
+
+experiment:
+  tasks: [training]
+  training:
+    # The released MimicGen IDM ran batch 16 @128^2, T=8, 2 views, unfrozen
+    # VGGT-1B on an H200. Two 24 GB 3090s cannot hold that; start at 4 per rank
+    # (8 global under DDP) and raise if there is headroom.
+    batch_size: 4
+    lr: 5e-5
+    max_steps: 60000
+    log_every_n_steps: 20
+    enable_progress_bar: true
+    progress_bar_refresh_rate: 1
+    optim:
+      accumulate_grad_batches: 1
+    data:
+      num_workers: 4
+      # "spawn" avoids DataLoader workers inheriting a dead CUDA context from the
+      # parent (which killed workers with "CUDA error: initialization error").
+      # base_data_module defaults to this; stated here so it is visible.
+      multiprocessing_context: spawn
+      pin_memory: true
+      prefetch_factor: 4
+      persistent_workers: true
+      cache:
+        trajectory: 64
+        npz: 256
+    checkpointing:
+      every_n_train_steps: 500
+      save_top_k: 1
+      save_last: true
+      monitor: loss/training/total
+      mode: min
+
+  validation:
+    batch_size: 1
+    shuffle: false
+    val_every_n_step: 500
+    num_sanity_val_steps: 1
+    limit_batch: 1
+    data:
+      shuffle: false
+      num_workers: 2
+      pin_memory: true
+      prefetch_factor: 2
+      persistent_workers: true
+      cache:
+        trajectory: 0
+        npz: 4
+
+  find_unused_parameters: false
+
+dataset:
+  metadata_cache_mode: load_or_build
+  force_rebuild: false
+  perf_log_every_n_samples: 0
+  resolution: 128
+  max_frames: 8
+  context_length: 4
+  sampling:
+    num_frames: 8
+  load_motion_tracks: false
+
+# One held-out episode (the last one) pinned deterministically for validation.
+validation_datasets:
+  soarm: { overfit_idx: 12 }
+
+algorithm:
+  supervision: flow
+  inverse_action_weight: 0.1
+  motion_aware_flow_weighting: true
+  motion_aware_flow_threshold: 0.02
+  motion_aware_moving_weight: 8.0
+  view_flow_balance_mode: active_pixels
+  view_balance_min_active_ratio: 0.01
+  view_balance_max_view_weight: 5.0
+  view_balanced_flow_loss: true
+  log_flow_per_view: true
+  # pmap-style regularizers (VGGT arXiv:2503.11651 §3.4): kill floaters
+  # (isolated high-|J| pixels in no-motion regions) and temporal jitter.
+  flow_gradient_weight: 0.25
+  jacobian_tv_weight: 0.05
+  jacobian_tv_edge_aware: true
+  jacobian_tv_edge_beta: 10.0
+  predict_uncertainty: true
+  pmap_uncertainty_weight: 1.0
+  model:
+    pretrained_model_id: facebook/VGGT-1B
+    checkpoint_path: null
+    # VGGT-1B unfrozen does NOT fit a 24 GB card: fp32 master weights + grads +
+    # two AdamW moments for 1.26 B params is ~20 GB before activations, and batch 2
+    # OOMed on a 3090 (measured). Frozen, only the DPT decoder trains (82 modules
+    # in train mode vs 1380 in eval) and batch 4 runs comfortably — the same
+    # trade the released PushT IDM makes (`freeze_backbone: true`).
+    freeze_aggregator: true
+    output_scale: 1.0
+    predict_uncertainty: true
+  logging:
+    loss_freq: 20
+    max_validation_batches: 1
+    max_validation_samples: 1
+    max_validation_views: 1
+    max_num_videos: 4
+    max_validation_frames: 8
+
+wandb:
+  project: jacobian-soarm
+  group: soarm-vggt-1b-pickplace
+  tags: [soarm, vggt-1b, jacobian, pickplace, wrist-view, rtx3090]
+
+hydra:
+  run:
+    dir: ${oc.env:VERA_DATA_PREFIX,/path/to/data}/datasets/jacobian/wandb_runs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${name}
+  sweep:
+    dir: ${oc.env:VERA_DATA_PREFIX,/path/to/data}/datasets/jacobian/wandb_runs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

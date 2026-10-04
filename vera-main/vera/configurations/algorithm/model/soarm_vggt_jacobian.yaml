@@ -1,0 +1,21 @@
+# Jacobian IDM for SO-ARM101: the MimicGen/DROID VGGT model with a 6-DoF head.
+#
+# `command_dim` is the ONLY place the action dimension enters the model
+# (output_dim = command_dim * spatial_dim, in JacobianDptHead); it is not
+# inferred from the data, so 6 = 5 arm joints + gripper must be set explicitly.
+name: vggt_jacobian
+command_dim: 6
+spatial_dim: 2
+image_size: ${dataset.resolution}
+checkpoint_path: null
+pretrained_model_id: null
+strict_checkpoint_load: true
+freeze_aggregator: false
+aggregator_lr_multiplier: 1.0
+patch_size: 14
+embed_dim: 1024
+decoder_features: 256
+decoder_out_channels: [256, 512, 1024, 1024]
+decoder_intermediate_layer_idx: [4, 11, 17, 23]
+decoder_pos_embed: true
+output_scale: 1.0

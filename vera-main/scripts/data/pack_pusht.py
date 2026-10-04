@@ -499,7 +499,7 @@ def _build_base_metadata(
 
 def _episode_entries(
     *,
-    videos: dict[str, Path],
+    videos: dict[str, Path | np.ndarray],
     trajectory_arrays: dict[str, np.ndarray],
     metadata: PackedEpisodeMetadata,
     device: torch.device,
@@ -514,15 +514,28 @@ def _episode_entries(
     cache_policy: str,
     temporal_stride: int = 1,
 ) -> Iterable[tuple[str, np.ndarray]]:
+    """Yield the (key, array) entry stream for one episode.
+
+    ``videos`` maps a view name to either a path (loaded whole via
+    ``_load_video_uint8`` — fine for PushT's one-mp4-per-episode layout) or to an
+    already-decoded ``THWC`` uint8 array. The array form exists for
+    ``pack_lerobot.py``, whose episodes are *slices* of multi-episode files that
+    must be decoded by frame range (a whole 8,942-frame file would be ~25 GB as
+    uint8). Frames handed in as an array are taken as already-strided, so callers
+    should pass ``temporal_stride=1`` with them.
+    """
     for dataset_key, arr in trajectory_arrays.items():
         yield trajectory_entry_key(dataset_key), np.asarray(arr)
 
     for view, video_path in videos.items():
-        video_np, _fps = _load_video_uint8(video_path)
-        # Temporal subsampling (e.g. 50Hz -> 10Hz with stride=5); unused (=1) for
-        # the released PushT pack, whose renders are already 10 fps.
-        if temporal_stride > 1:
-            video_np = video_np[::temporal_stride]
+        if isinstance(video_path, np.ndarray):
+            video_np = video_path
+        else:
+            video_np, _fps = _load_video_uint8(video_path)
+            # Temporal subsampling (e.g. 50Hz -> 10Hz with stride=5); unused (=1) for
+            # the released PushT pack, whose renders are already 10 fps.
+            if temporal_stride > 1:
+                video_np = video_np[::temporal_stride]
         if video_np.shape[0] == 0:
             continue
 

@@ -39,6 +39,18 @@ JACOBIAN_COLORMAP: Dict[str, List[List[float]]] = {
         [0.7915, 0.7157, 0.9812],   # #cab7fa — pastel lavender
         [0.9886, 0.8282, 0.9657],   # #fcd3f6 — pastel magenta
     ],
+    # SO-ARM101: 5 arm joints + gripper -> command_dim 6, so the palette needs
+    # >= 6 entries (draw_per_channel_jacobian_pastel raises otherwise, which used
+    # to crash validation for this embodiment). Pastel hues, same recipe as
+    # eef_gripper, ordered so neighbouring joints stay distinguishable.
+    "soarm": [
+        [0.9725, 0.9412, 0.6863],   # #f8f0af — pastel yellow
+        [0.8282, 0.9199, 0.9886],   # #d3ebfc — pastel sky
+        [0.9886, 0.8282, 0.8282],   # #fcd3d3 — pastel pink
+        [0.7569, 0.9804, 0.9686],   # #c1faf7 — pastel cyan
+        [0.8784, 0.9961, 0.8784],   # #e0fee0 — pastel mint
+        [0.7915, 0.7157, 0.9812],   # #cab7fa — pastel lavender
+    ],
     "panda": [
         [0.0, 0.5, 0.5],  # teal
         [0.0, 1.0, 0.0],  # green

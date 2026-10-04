@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 from collections import Counter
 from typing import Any, Set
@@ -13,6 +14,29 @@ from vera.datasets.registry import (
     build_dataset,
     resolve_dataset_cfg,
 )
+
+
+class _WorkerInitializer:
+    """Picklable ``worker_init_fn``.
+
+    A lambda (or a closure) cannot be pickled, so a DataLoader started with
+    ``multiprocessing_context="spawn"`` fails at the first batch with
+    ``AttributeError: Can't pickle local object ...<lambda>``. This holds the two
+    arguments the init needs instead of closing over them.
+    """
+
+    def __init__(self, dataset: Any, data_cfg: Any):
+        self.dataset = dataset
+        self.data_cfg = data_cfg
+
+    def __call__(self, worker_id: int) -> None:
+        BaseDataModule._worker_init(self.dataset, self.data_cfg, worker_id)
+
+
+def _picklable_collate(batch: Any) -> Any:
+    """Module-level wrapper so ``collate_fn`` does not capture the datamodule
+    instance (which holds the model/trainer and is not worth pickling)."""
+    return BaseDataModule._safe_default_collate(batch)
 
 
 class BaseDataModule(pl.LightningDataModule):
@@ -382,6 +406,28 @@ class BaseDataModule(pl.LightningDataModule):
         shuffle = self._get_shuffle(split, dataset, split_cfg.data.shuffle)
         generator = self._get_loader_generator(split, shuffle)
 
+        # Worker start method. The default "fork" is unsafe once CUDA has been
+        # initialized in the parent: the child inherits a dead CUDA context and
+        # any CUDA call in the worker dies with
+        #   terminate called ... c10::Error: what(): CUDA error: initialization error
+        # which PyTorch surfaces only later as
+        #   "DataLoader worker (pid N) exited unexpectedly".
+        # Reproduced with 2x RTX 3090 + the SO-ARM packed dataset. "spawn" starts
+        # a fresh interpreter per worker, so the child has no inherited context.
+        # Datasets must be picklable (ours are). Override per split with
+        # `multiprocessing_context: fork` if a dataset is not.
+        mp_context = str(getattr(split_cfg.data, "multiprocessing_context", "spawn"))
+        mp_context = None if num_workers == 0 else mp_context
+        if mp_context is not None:
+            try:
+                multiprocessing.get_context(mp_context)
+            except ValueError:
+                print(
+                    f"[DataModule] unknown multiprocessing_context={mp_context!r}; "
+                    "falling back to the platform default."
+                )
+                mp_context = None
+
         if loader_label not in self._logged_loader_settings:
             print(
                 "[DataModule] "
@@ -390,7 +436,7 @@ class BaseDataModule(pl.LightningDataModule):
                 f"shuffle_seed={getattr(split_cfg.data, 'shuffle_seed', None) if shuffle else None}, "
                 f"persistent_workers={persistent_workers}, "
                 f"prefetch_factor={prefetch_factor if num_workers > 0 else None}, "
-                f"pin_memory={pin_memory}"
+                f"pin_memory={pin_memory}, mp_context={mp_context}"
             )
             self._logged_loader_settings.add(loader_label)
 
@@ -403,10 +449,9 @@ class BaseDataModule(pl.LightningDataModule):
             generator=generator,
             prefetch_factor=prefetch_factor if (num_workers > 0) else None,
             persistent_workers=persistent_workers,
-            collate_fn=self._safe_default_collate,
-            worker_init_fn=lambda worker_id: self._worker_init(
-                dataset, split_cfg.data, worker_id
-            ),
+            collate_fn=_picklable_collate,
+            worker_init_fn=_WorkerInitializer(dataset, split_cfg.data),
+            multiprocessing_context=mp_context,
         )
 
     def _dataloader(self, split: str) -> TRAIN_DATALOADERS | EVAL_DATALOADERS:

@@ -1,0 +1,86 @@
+# SO-ARM101 tabletop pick-and-place — packed training set for the Jacobian IDM.
+#
+# Produced from the LeRobot recording by
+#   python scripts/data/pack_lerobot.py --source-root <lerobot dataset> \
+#     --output-root $VERA_DATA_PREFIX/datasets/jacobian/soarm_packed \
+#     --views desk --temporal-stride 3 --flow-resolution 256 256
+#
+# Layout: $VERA_DATA_PREFIX/datasets/jacobian/soarm_packed (okto_packed v1:
+# one NPZ per episode with JPEG frames, qint8 MegaFlow flow and `traj_state`).
+#
+# `name: robomimic` is deliberate: it is the routed name for the self-contained
+# packed path (see registry._PACKED_NAMES / _DEFAULT_ACTION_MODE and
+# JacobianLearningExperiment.compatible_datasets), so this embodiment needs no
+# registry edits. MimicGen does exactly the same. The explicit `action_mode`
+# below overrides the per-name default.
+defaults:
+  - base_dataset_with_algo
+
+name: robomimic
+robot_name: soarm
+dataset_type: real
+root: ${oc.env:VERA_DATA_PREFIX,/path/to/data}/datasets/jacobian/soarm_packed
+overfit_idx: null
+
+# 128x128 per view, the resolution the released MimicGen IDM recipe uses.
+resolution: 128
+
+# The wrist camera ("desk" in the recording) is the ONLY view packed: the fixed
+# scene camera's optical flow is ~0.05 px/frame at 256x256 (the blocks are ~11
+# px wide there and barely move over 0.1 s) — 1% of pixels exceed 0.5 px, so it
+# is measurement noise, not supervision. Measured on episode 0:
+#   desk |f| mean 5.38 px, 73% of pixels > 0.5 px   -> real motion
+#   wide |f| mean 0.05 px,  1% of pixels > 0.5 px   -> noise
+camera:
+  views: ["desk"]
+  image_size: ["${dataset.resolution}", "${dataset.resolution}"]
+
+# du = (state[t+1] - state[t]) * action_scale * du_scale / action_abs_scale,
+# i.e. a joint-space finite difference over the 6 recorded channels, in their
+# native units (5 arm joints in DEGREES + gripper in 0..100 — lerobot's SO-101
+# mixes DEGREES body joints with a RANGE_0_100 gripper).
+action_mode: qpos_delta
+qpos_key: state
+qpos_indices: null          # all 6 channels
+action_scale: 1.0
+du_scale: 1.0
+
+sampling:
+  num_frames: 8
+  linearize_time_length: 1
+
+# p90 |state[t+3] - state[t]| over all 13 packed episodes (30 fps -> 10 fps),
+# per channel, in native units. Measured with scripts/data/check_packed.py
+# (4399 steps). Dividing by it puts du's p90 at ~1 per channel.
+action_normalization_mode: symmetric_percentile
+action_percentile: 90.0
+action_abs_scale:
+  - 1.230769
+  - 4.483516
+  - 3.956047
+  - 2.285713
+  - 3.076923
+  - 0.756533
+
+# Flow is normalized AFTER the loader resizes it to camera.image_size, so these
+# stats are measured at 128x128 — not at the 256x256 storage resolution (the same
+# flow measures ~2x larger there, so storage-resolution stats would shrink the
+# target by 2x). p90 of |u| / |v| measured through PackedViewLoader at 128x128
+# over 95M pixels (scripts/data/check_packed.py).
+flow_normalization_space: raw_fullres
+flow_normalization_mode: symmetric_percentile
+oflow_scale: null
+oflow_percentile: 90.0
+oflow_abs_scale:
+  - 2.932113
+  - 4.522174
+
+load_motion_tracks: false
+
+# Algorithm-facing
+save_dir: data/soarm_packed_placeholder
+max_frames: 8
+context_length: 4
+observation_shape: [3, "${dataset.resolution}", "${dataset.resolution}"]
+data_mean: [[[0.0]], [[0.0]], [[0.0]]]
+data_std: [[[1.0]], [[1.0]], [[1.0]]]
