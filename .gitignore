@@ -25,3 +25,6 @@ dist/
 .venv/
 venv/
 env/
+
+# 讲解视频的中间素材（.npy 张量，可用 video/make_assets.py 重新生成）
+/video/assets/
